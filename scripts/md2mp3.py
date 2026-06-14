@@ -43,6 +43,29 @@ except ImportError:
     sys.exit(1)
 
 
+# ============== .env 自动加载 ==============
+
+def load_env_file(env_path: Optional[Path] = None) -> None:
+    """从 .env 文件加载环境变量(不覆盖已有变量,无依赖实现)"""
+    if env_path is None:
+        # 脚本在 scripts/, .env 在 skill 根目录
+        env_path = Path(__file__).resolve().parent.parent / ".env"
+
+    if not env_path.exists():
+        return
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        # 不覆盖系统已有的环境变量
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 # ============== 配置 ==============
 
 API_ENDPOINT = "https://api.minimax.chat/v1/t2a_v2"
@@ -259,6 +282,9 @@ def insert_silence(audio_path: str, silence_ms: int, output_path: str):
 # ============== 主流程 ==============
 
 def main():
+    # 先加载 .env(若存在)
+    load_env_file()
+
     parser = argparse.ArgumentParser(
         description="Markdown 口播文案一键转 MP3",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -277,6 +303,11 @@ def main():
     parser.add_argument("--insert-pauses", "-p", action="store_true", help="在 ... 和 —— 处插入静音")
     parser.add_argument("--pause-ms", type=int, default=600, help="停顿毫秒数（默认 600）")
     parser.add_argument("--api-key", default=None, help="MiniMax API Key（默认从环境变量 MINIMAX_API_KEY 读取）")
+    parser.add_argument("--srt", action="store_true", help="同时生成 SRT 字幕")
+    parser.add_argument("--vtt", action="store_true", help="同时生成 WebVTT 字幕")
+    parser.add_argument("--segments-json", action="store_true", help="同时生成 JSON 时间戳")
+    parser.add_argument("--min-chars", type=int, default=6, help="字幕句最短字符数")
+    parser.add_argument("--max-chars", type=int, default=18, help="字幕句最长字符数")
 
     args = parser.parse_args()
 
@@ -335,28 +366,13 @@ def main():
         tmp = Path(tmpdir)
         segment_files = []
 
-        # 逐段生成
-        for i, chunk in enumerate(chunks, 1):
-            print(f"🎙️  生成第 {i}/{len(chunks)} 段 ({len(chunk)} 字符)...")
-            try:
-                audio_data = call_tts(chunk, voice_id, api_key, speed, volume)
-            except Exception as e:
-                print(f"❌ 第 {i} 段生成失败: {e}")
-                sys.exit(1)
-
-            seg_path = tmp / f"seg_{i:03d}.mp3"
-            seg_path.write_bytes(audio_data)
-            segment_files.append(str(seg_path))
-            print(f"   ✅ 第 {i} 段完成 ({len(audio_data) / 1024:.1f} KB)")
-
-        # 插入停顿
         if insert_pauses:
-            print("⏸️  插入停顿...")
-            paused_files = []
-            # 重新切分（按句子），用于在每句后插入停顿
+            # 插入停顿模式：按句子生成 TTS，在每句末尾插入静音，再合并
+            # （避免 re-split 已有 chunk 导致重复 API 调用）
+            print("⏸️  插入停顿模式：按句子生成 TTS...")
+            all_sent_files = []
             for i, chunk in enumerate(chunks, 1):
                 sentences = split_text_by_pauses(chunk, insert_pauses=True, pause_ms=pause_ms)
-                sent_files = []
                 for j, sent in enumerate(sentences, 1):
                     try:
                         audio_data = call_tts(sent["text"], voice_id, api_key, speed, volume)
@@ -366,26 +382,55 @@ def main():
                     s_path = tmp / f"sent_{i:03d}_{j:03d}.mp3"
                     s_path.write_bytes(audio_data)
 
-                    # 在末尾插入停顿
                     if sent["pause_after_ms"] > 0:
                         paused_path = tmp / f"paused_{i:03d}_{j:03d}.mp3"
                         insert_silence(str(s_path), sent["pause_after_ms"], str(paused_path))
-                        sent_files.append(str(paused_path))
+                        all_sent_files.append(str(paused_path))
                     else:
-                        sent_files.append(str(s_path))
+                        all_sent_files.append(str(s_path))
 
-                # 合并该段的所有句子
-                if len(sent_files) > 1:
-                    merged_path = tmp / f"para_{i:03d}.mp3"
-                    merge_audio_files(sent_files, str(merged_path))
-                    paused_files.append(str(merged_path))
-                else:
-                    paused_files.append(sent_files[0])
-            segment_files = paused_files
+                print(f"   ✅ Chunk {i}/{len(chunks)}: {len(sentences)} 句")
 
-        # 合并所有段
-        print("🔗 拼接最终音频...")
-        merge_audio_files(segment_files, str(output_path))
+            # 按段落合并句子（避免生成过多小文件）
+            para_files = []
+            para_buffer = []
+            para_size = 0
+            for sf in all_sent_files:
+                para_size += Path(sf).stat().st_size
+                para_buffer.append(sf)
+                # 每 10 句或文件够大时合并一次
+                if len(para_buffer) >= 10 or para_size > 500_000:
+                    merged_path = tmp / f"para_{len(para_files)+1:03d}.mp3"
+                    merge_audio_files(para_buffer, str(merged_path))
+                    para_files.append(str(merged_path))
+                    para_buffer = []
+                    para_size = 0
+            if para_buffer:
+                merged_path = tmp / f"para_{len(para_files)+1:03d}.mp3"
+                merge_audio_files(para_buffer, str(merged_path))
+                para_files.append(str(merged_path))
+
+            # 最后合并所有段落
+            print("🔗 拼接最终音频...")
+            merge_audio_files(para_files, str(output_path))
+        else:
+            # 无停顿模式：直接按 chunk 生成（最少 API 调用）
+            for i, chunk in enumerate(chunks, 1):
+                print(f"🎙️  生成第 {i}/{len(chunks)} 段 ({len(chunk)} 字符)...")
+                try:
+                    audio_data = call_tts(chunk, voice_id, api_key, speed, volume)
+                except Exception as e:
+                    print(f"❌ 第 {i} 段生成失败: {e}")
+                    sys.exit(1)
+
+                seg_path = tmp / f"seg_{i:03d}.mp3"
+                seg_path.write_bytes(audio_data)
+                segment_files.append(str(seg_path))
+                print(f"   ✅ 第 {i} 段完成 ({len(audio_data) / 1024:.1f} KB)")
+
+            # 合并所有段
+            print("🔗 拼接最终音频...")
+            merge_audio_files(segment_files, str(output_path))
 
         size_kb = output_path.stat().st_size / 1024
         print("")
@@ -394,6 +439,33 @@ def main():
         print(f"📦 文件大小: {size_kb:.1f} KB")
         print(f"⏱️  实际时长: {size_kb / 16 / speed:.1f} 分钟（粗略估算）")
         print("=" * 50)
+
+        # 生成字幕
+        if args.srt or args.vtt or args.segments_json:
+            try:
+                from SubsGen import generate_subtitles_for_text, save_subtitles
+                # 用清理后的正文生成字幕
+                sub_text = clean_markdown(body)
+                sub = generate_subtitles_for_text(
+                    sub_text, audio_path=str(output_path),
+                    min_chars=args.min_chars, max_chars=args.max_chars,
+                )
+                base = output_path.with_suffix("")
+                written = save_subtitles(
+                    base.parent, base.name,
+                    srt=sub["srt"] if args.srt else None,
+                    vtt=sub["vtt"] if args.vtt else None,
+                    json_data=sub["json"] if args.segments_json else None,
+                )
+                print(f"📝 字幕生成: {len(sub['sentences'])} 句", end="")
+                if sub["audio_duration"]:
+                    print(f" (音频 {sub['audio_duration']:.2f}s 已归一化)")
+                else:
+                    print()
+                for fmt, p in written.items():
+                    print(f"   {fmt.upper()}: {p}")
+            except ImportError:
+                print("⚠️  SubsGen.py 未找到,跳过字幕生成")
 
 
 if __name__ == "__main__":

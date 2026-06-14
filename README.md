@@ -2,7 +2,7 @@
 
 > MiniMax TTS 语音合成 + 反 AI 味口播脚本写手 + MD→MP3 一键转换
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.5.1-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)]()
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]()
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)]()
@@ -54,15 +54,18 @@
 
 ```
 multi-agent-mmx-tts/
-├── README.md                   ← 本文件
-├── SKILL.md                    ← Skill 主入口（触发词、API Key 流程）
+├── README.md                    ← 本文件
+├── SKILL.md                     ← Skill 主入口（触发词、API Key 流程）
 ├── references/
-│   ├── voice-list.md           ← 完整音色列表
-│   ├── api-reference.md        ← API 参考文档（参数、错误码、限制）
-│   └── script-writer.md        ← 口播脚本写手指南（反 AI 味）
+│   ├── voice-list.md            ← 完整音色列表
+│   ├── api-reference.md         ← API 参考文档（参数、错误码、限制）
+│   ├── script-writer.md         ← 口播脚本写手指南（反 AI 味）
+│   └── content-mapping-template.md ← 内容映射表模板（防虚构）
 └── scripts/
-    ├── md2mp3.py               ← MD → MP3 一键转换
-    └── tts-gen.py              ← 通用 TTS 生成器
+    ├── md2mp3.py                ← MD → MP3 一键转换
+    ├── tts-gen.py               ← 通用 TTS 生成器（自动 Edge TTS 兜底）
+    ├── tts-with-subs.py         ← TTS + 字幕一键生成（SRT/VTT/JSON）
+    └── SubsGen.py               ← 字幕生成模块（切句/时间戳/格式导出）
 ```
 
 ---
@@ -246,14 +249,14 @@ python scripts/tts-gen.py "测试" --voice 国语女声 --speed 1.2
 ## 🔗 完整工作流（与 wechat MP3 项目集成）
 
 ```
-1. 选题（multi-agent-wechat skill）
+1. 选题（multi-agent-wechat-html v3.0 skill）
    ↓
 2. 用本 Skill 的"脚本写手"模块写口播稿
    ↓
-3. 写入 C:\Claude\wechat\MP3\项目名\口播文案.md
-   （带 Frontmatter 配置）
+3. 写入 <项目目录>/口播文案.md（带 Frontmatter 配置）
    ↓
 4. 运行 md2mp3.py 一键生成同名 MP3
+   或 python scripts/tts-with-subs.py 口播文案.md --md --all-subs
    ↓
 5. 发布到公众号 / 视频号 / 抖音
 ```
